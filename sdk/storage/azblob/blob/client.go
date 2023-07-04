@@ -8,11 +8,13 @@ package blob
 
 import (
 	"context"
-	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
+	"errors"
 	"io"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
@@ -335,6 +337,41 @@ func (b *Client) download(ctx context.Context, writer io.WriterAt, o downloadOpt
 		return 0, nil
 	}
 
+	buffers := shared.NewMMBPool(int(o.Concurrency), o.BlockSize)
+	defer buffers.Free()
+	aquireBuffer := func() ([]byte, error) {
+		select {
+		case b := <-buffers.Acquire():
+			// got a buffer
+			return b, nil
+		default:
+			// no buffer available; allocate a new buffer if possible
+			if _, err := buffers.Grow(); err != nil {
+				return nil, err
+			}
+
+			// either grab the newly allocated buffer or wait for one to become available
+			return <-buffers.Acquire(), nil
+		}
+	}
+
+	numChunks := uint16((count - 1)/ o.BlockSize) + 1
+	blocks := make([]chan []byte, numChunks)
+	for b := range blocks { 
+		blocks[b] = make(chan []byte)
+	}
+
+	go func() {
+		for i, block := range blocks {
+			offset := o.BlockSize * int64(i - 1)
+			select {
+			case <-ctx.Done():
+				return
+			case b := <- block:
+				writer.WriteAt(b, offset)
+			}
+		}
+	}()
 	// Prepare and do parallel download.
 	progress := int64(0)
 	progressLock := &sync.Mutex{}
@@ -344,11 +381,17 @@ func (b *Client) download(ctx context.Context, writer io.WriterAt, o downloadOpt
 		TransferSize:  count,
 		ChunkSize:     o.BlockSize,
 		Concurrency:   o.Concurrency,
-		Operation: func(ctx context.Context, chunkStart int64, count int64) error {
+		Operation: func(ctx context.Context, chunkNum uint16, chunkStart int64, count int64) error {
 			downloadBlobOptions := o.getDownloadBlobOptions(HTTPRange{
 				Offset: chunkStart + o.Range.Offset,
 				Count:  count,
 			}, nil)
+
+			buffer, err := aquireBuffer()
+			if err != nil {
+				return err
+			}
+
 			dr, err := b.DownloadStream(ctx, downloadBlobOptions)
 			if err != nil {
 				return err
@@ -367,10 +410,19 @@ func (b *Client) download(ctx context.Context, writer io.WriterAt, o downloadOpt
 						progressLock.Unlock()
 					})
 			}
-			_, err = io.Copy(shared.NewSectionWriter(writer, chunkStart, count), body)
+
+			readSize, err := body.Read(buffer);
 			if err != nil {
 				return err
 			}
+			if int64(readSize) != count {
+				//what error to return
+				return errors.New("error reading blob")
+			}
+
+			blocks[chunkNum] <- buffer
+			close(blocks[chunkNum])
+			    
 			err = body.Close()
 			return err
 		},

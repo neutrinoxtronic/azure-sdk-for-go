@@ -441,7 +441,7 @@ func (bb *Client) uploadFromReader(ctx context.Context, reader io.ReaderAt, actu
 		TransferSize:  actualSize,
 		ChunkSize:     o.BlockSize,
 		Concurrency:   o.Concurrency,
-		Operation: func(ctx context.Context, offset int64, chunkSize int64) error {
+		Operation: func(ctx context.Context, _ uint16, offset int64, chunkSize int64) error {
 			// This function is called once per block.
 			// It is passed this block's offset within the buffer and its count of bytes
 			// Prepare to read the proper block/section of the buffer

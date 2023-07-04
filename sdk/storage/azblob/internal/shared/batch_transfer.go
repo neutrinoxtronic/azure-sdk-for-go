@@ -16,7 +16,7 @@ type BatchTransferOptions struct {
 	TransferSize  int64
 	ChunkSize     int64
 	Concurrency   uint16
-	Operation     func(ctx context.Context, offset int64, chunkSize int64) error
+	Operation     func(ctx context.Context, chunkNum uint16, offset int64, chunkSize int64) error
 	OperationName string
 }
 
@@ -58,7 +58,7 @@ func DoBatchTransfer(ctx context.Context, o *BatchTransferOptions) error {
 		}
 		offset := int64(chunkNum) * o.ChunkSize
 		operationChannel <- func() error {
-			return o.Operation(ctx, offset, curChunkSize)
+			return o.Operation(ctx, chunkNum, offset, curChunkSize)
 		}
 	}
 	close(operationChannel)
